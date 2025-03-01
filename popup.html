@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Web Element Selector</title>
+  <link rel="stylesheet" type="text/css" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Web Element Selector</h1>
+    
+    <div class="button-container">
+      <button id="start-selection">Start Selection Mode</button>
+      <button id="stop-selection" disabled>Stop Selection</button>
+      <button id="clear-data">Clear Data</button>
+      <button id="export-csv">Export to CSV</button>
+    </div>
+    
+    <div class="status-container">
+      <p>Status: <span id="status">Ready</span></p>
+      <p>Selected Elements: <span id="element-count">0</span></p>
+    </div>
+    
+    <div class="data-preview">
+      <h2>Selected Data Preview</h2>
+      <div id="data-preview-container">
+        <p>No data selected yet</p>
+      </div>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
