@@ -1,6 +1,6 @@
 {
     "manifest_version": 3,
-    "name": "Web Element Selector",
+    "name": "Web Element Scrapping",
     "version": "1.0",
     "description": "Select web elements and export their data to CSV",
     "permissions": ["activeTab", "scripting", "storage", "downloads"],
