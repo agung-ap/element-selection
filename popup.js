@@ -10,6 +10,33 @@ const dataPreviewContainer = document.getElementById('data-preview-container');
 // Global variables
 let selectedElements = [];
 
+// Utility: safe sendMessage that injects content.js if needed
+function sendMessageSafe(tabId, message, callback, attempt = 0) {
+  chrome.tabs.sendMessage(tabId, message, (response) => {
+    if (chrome.runtime.lastError) {
+      // Try to inject content.js once for tabs we can access
+      if (attempt === 0) {
+        try {
+          chrome.scripting.executeScript(
+            { target: { tabId }, files: ['content.js'] },
+            () => {
+              // Retry message once after injection attempt
+              sendMessageSafe(tabId, message, callback, 1);
+            }
+          );
+        } catch (e) {
+          // Give up gracefully if injection not allowed (e.g., chrome://)
+          if (typeof callback === 'function') callback(undefined, chrome.runtime.lastError);
+        }
+      } else {
+        if (typeof callback === 'function') callback(undefined, chrome.runtime.lastError);
+      }
+      return;
+    }
+    if (typeof callback === 'function') callback(response);
+  });
+}
+
 // Initialize the popup
 document.addEventListener('DOMContentLoaded', async () => {
   // Check if selection mode is active
@@ -27,23 +54,23 @@ document.addEventListener('DOMContentLoaded', async () => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs[0]) {
       // Ask content script for current state
-      chrome.tabs.sendMessage(tabs[0].id, { action: 'getSelectionState' }, (response) => {
-        if (response) {
-          // Update UI based on current state from content script
-          if (response.isSelectionMode !== undefined) {
-            toggleSelectionButtons(response.isSelectionMode);
-            statusElement.textContent = response.isSelectionMode ? 'Selection Mode Active' : 'Ready';
-            
-            // Update storage to match content script state
-            chrome.storage.local.set({ isSelectionMode: response.isSelectionMode });
-          }
-          
-          // Update selected elements
-          if (response.elements) {
-            selectedElements = response.elements;
-            updateElementCount(selectedElements.length);
-            updateDataPreview();
-          }
+      sendMessageSafe(tabs[0].id, { action: 'getSelectionState' }, (response, err) => {
+        if (!response) {
+          // No content script (restricted pages). Keep default UI quietly.
+          return;
+        }
+        // Update UI based on current state from content script
+        if (response.isSelectionMode !== undefined) {
+          toggleSelectionButtons(response.isSelectionMode);
+          statusElement.textContent = response.isSelectionMode ? 'Selection Mode Active' : 'Ready';
+          // Update storage to match content script state
+          chrome.storage.local.set({ isSelectionMode: response.isSelectionMode });
+        }
+        // Update selected elements
+        if (response.elements) {
+          selectedElements = response.elements;
+          updateElementCount(selectedElements.length);
+          updateDataPreview();
         }
       });
     }
@@ -54,12 +81,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 startSelectionBtn.addEventListener('click', () => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs[0]) {
-      chrome.tabs.sendMessage(tabs[0].id, { action: 'startSelection' }, (response) => {
+      sendMessageSafe(tabs[0].id, { action: 'startSelection' }, (response) => {
         if (response && response.status) {
           statusElement.textContent = 'Selection Mode Active';
           toggleSelectionButtons(true);
-          
-          // Store selection mode state
           chrome.storage.local.set({ isSelectionMode: true });
         }
       });
@@ -71,12 +96,10 @@ startSelectionBtn.addEventListener('click', () => {
 stopSelectionBtn.addEventListener('click', () => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs[0]) {
-      chrome.tabs.sendMessage(tabs[0].id, { action: 'stopSelection' }, (response) => {
+      sendMessageSafe(tabs[0].id, { action: 'stopSelection' }, (response) => {
         if (response && response.status) {
           statusElement.textContent = 'Ready';
           toggleSelectionButtons(false);
-          
-          // Store selection mode state
           chrome.storage.local.set({ isSelectionMode: false });
         }
       });
@@ -88,7 +111,7 @@ stopSelectionBtn.addEventListener('click', () => {
 clearDataBtn.addEventListener('click', () => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs[0]) {
-      chrome.tabs.sendMessage(tabs[0].id, { action: 'clearData' }, (response) => {
+      sendMessageSafe(tabs[0].id, { action: 'clearData' }, (response) => {
         if (response) {
           selectedElements = [];
           updateElementCount(0);

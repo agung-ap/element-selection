@@ -3,7 +3,7 @@
     "name": "Web Element Scrapping",
     "version": "1.0",
     "description": "Select web elements and export their data to CSV",
-    "permissions": ["activeTab", "scripting", "storage", "downloads"],
+    "permissions": ["activeTab", "tabs", "scripting", "storage", "downloads"],
     "action": {
       "default_popup": "popup.html",
       "default_icon": {

@@ -75,6 +75,27 @@ let highlightedElement = null;
 let highlightOverlay = null;
 let navbarElement = null;
 
+// Persistence helpers: store selections per tab via background
+function appendSelectionToBackground(elementData, cb) {
+  try {
+    chrome.runtime.sendMessage({ action: 'appendSelection', data: elementData }, (resp) => {
+      if (typeof cb === 'function') cb(resp);
+    });
+  } catch (_) { if (typeof cb === 'function') cb(); }
+}
+
+function loadSelectionsFromBackground(callback) {
+  try {
+    chrome.runtime.sendMessage({ action: 'getTabSelections' }, (resp) => {
+      const saved = resp && Array.isArray(resp.elements) ? resp.elements : [];
+      selectedElements = saved;
+      if (typeof callback === 'function') callback(selectedElements);
+    });
+  } catch (_) {
+    if (typeof callback === 'function') callback(selectedElements);
+  }
+}
+
 // Listen for messages from the popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'startSelection') {
@@ -87,17 +108,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ elements: selectedElements });
   } else if (message.action === 'clearData') {
     selectedElements = [];
+    // Clear persisted selections for this tab in background
+    try { chrome.runtime.sendMessage({ action: 'clearTabSelections' }); } catch (_) {}
     // Update the navbar counter if it exists
     if (window.updateElementCounter) {
       window.updateElementCounter(0);
     }
     sendResponse({ status: 'Data cleared', count: 0 });
   } else if (message.action === 'getSelectionState') {
-    // New handler to return the current selection state and elements
-    sendResponse({ 
-      isSelectionMode: isSelectionMode,
-      elements: selectedElements
-    });
+    // Ensure we return persisted data even on fresh loads
+    if (!Array.isArray(selectedElements) || selectedElements.length === 0) {
+      loadSelectionsFromBackground(() => {
+        sendResponse({ 
+          isSelectionMode: isSelectionMode,
+          elements: selectedElements
+        });
+      });
+    } else {
+      sendResponse({ 
+        isSelectionMode: isSelectionMode,
+        elements: selectedElements
+      });
+    }
   }
   return true;
 });
@@ -337,6 +369,10 @@ function startSelectionMode() {
   
   // Change cursor
   document.body.style.cursor = 'crosshair';
+  // Ensure counter reflects any restored selections
+  if (window.updateElementCounter) {
+    window.updateElementCounter(Array.isArray(selectedElements) ? selectedElements.length : 0);
+  }
   
   // Notify popup
   chrome.runtime.sendMessage({
@@ -442,9 +478,11 @@ function handleClick(event) {
   if (element) {
     // Extract element data
     const elementData = extractElementData(element);
-    
+
     // Add to selected elements array
     selectedElements.push(elementData);
+    // Persist in background so redirects keep selections
+    appendSelectionToBackground(elementData);
     
     // Update the counter in the navbar
     if (window.updateElementCounter) {
@@ -565,3 +603,19 @@ function flashElement(element) {
     element.style.backgroundColor = originalBackgroundColor;
   }, 500);
 }
+
+// On load: restore selections and (optionally) selection mode
+(function initializeFromStorage() {
+  loadSelectionsFromBackground(() => {
+    try {
+      chrome.storage.local.get('isSelectionMode', (data) => {
+        if (data && data.isSelectionMode) {
+          startSelectionMode();
+          if (window.updateElementCounter) {
+            window.updateElementCounter(Array.isArray(selectedElements) ? selectedElements.length : 0);
+          }
+        }
+      });
+    } catch (_) {}
+  });
+})();
