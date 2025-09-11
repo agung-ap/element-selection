@@ -12,28 +12,48 @@ let selectedElements = [];
 
 // Utility: safe sendMessage that injects content.js if needed
 function sendMessageSafe(tabId, message, callback, attempt = 0) {
-  chrome.tabs.sendMessage(tabId, message, (response) => {
+  const isRestrictedUrl = (url = '') => {
+    return /^(chrome|chrome-untrusted|devtools|edge|brave|vivaldi):\/\//.test(url)
+      || /^chrome-extension:\/\//.test(url)
+      || /chrome\.google\.com\/webstore/.test(url);
+  };
+
+  // First, fetch the tab to check restrictions
+  chrome.tabs.get(tabId, (tab) => {
     if (chrome.runtime.lastError) {
-      // Try to inject content.js once for tabs we can access
-      if (attempt === 0) {
-        try {
+      // Cannot access tab info; return gracefully
+      if (typeof callback === 'function') callback(undefined, chrome.runtime.lastError);
+      return;
+    }
+
+    if (!tab || isRestrictedUrl(tab.url)) {
+      const err = { message: 'Restricted URL, cannot access content script', url: tab?.url };
+      if (typeof callback === 'function') callback(undefined, err);
+      return;
+    }
+
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (chrome.runtime.lastError) {
+        // Try to inject content.js once for tabs we can access
+        if (attempt === 0) {
           chrome.scripting.executeScript(
             { target: { tabId }, files: ['content.js'] },
             () => {
-              // Retry message once after injection attempt
+              if (chrome.runtime.lastError) {
+                if (typeof callback === 'function') callback(undefined, chrome.runtime.lastError);
+                return;
+              }
+              // Retry message once after successful injection
               sendMessageSafe(tabId, message, callback, 1);
             }
           );
-        } catch (e) {
-          // Give up gracefully if injection not allowed (e.g., chrome://)
+        } else {
           if (typeof callback === 'function') callback(undefined, chrome.runtime.lastError);
         }
-      } else {
-        if (typeof callback === 'function') callback(undefined, chrome.runtime.lastError);
+        return;
       }
-      return;
-    }
-    if (typeof callback === 'function') callback(response);
+      if (typeof callback === 'function') callback(response);
+    });
   });
 }
 
@@ -221,15 +241,27 @@ function convertToCSV(data) {
   const firstObj = data[0];
   const excludeKeys = ['attributes', 'innerHTML', 'outerHTML']; // Exclude complex objects but keep selectedElement
   const headers = ['tagName', 'id', 'className', 'textContent', 'xpath', 'cssSelector', 'selectedElement', 'timestamp'];
+  // Add optional fields if present in data (absolute URLs, etc.)
+  const optionalFields = new Set();
+  data.forEach(item => {
+    ['currentSrc', 'srcAbsolute', 'hrefAbsolute', 'contentSources'].forEach(k => {
+      if (k in item) optionalFields.add(k);
+    });
+  });
+  const allHeaders = [...headers, ...Array.from(optionalFields)];
   
   // Create CSV header row
-  let csv = headers.join(',') + '\n';
+  let csv = allHeaders.join(',') + '\n';
   
   // Add data rows
   data.forEach(item => {
-    const row = headers.map(header => {
+    const row = allHeaders.map(header => {
       // Get the value and escape any commas and quotes
       let value = item[header];
+      // Join arrays like contentSources
+      if (Array.isArray(value)) {
+        value = value.join(' | ');
+      }
       
       // Convert to string and escape quotes
       value = (value === null || value === undefined) ? '' : String(value);

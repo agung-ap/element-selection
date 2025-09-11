@@ -33,7 +33,7 @@ function toggleSelectionMode() {
     document.body.style.cursor = 'default';
     
     // Notify popup that selection mode was toggled
-    chrome.runtime.sendMessage({
+    sendRuntimeMessageSafe({
       action: 'selectionToggled',
       isActive: false
     });
@@ -64,7 +64,7 @@ function toggleSelectionMode() {
     document.body.style.cursor = 'crosshair';
     
     // Notify popup that selection mode was toggled
-    chrome.runtime.sendMessage({
+    sendRuntimeMessageSafe({
       action: 'selectionToggled',
       isActive: true
     });
@@ -75,10 +75,27 @@ let highlightedElement = null;
 let highlightOverlay = null;
 let navbarElement = null;
 
+// Safe runtime messaging helper to avoid errors on pages/frames
+function sendRuntimeMessageSafe(message, callback) {
+  try {
+    if (!chrome || !chrome.runtime || !chrome.runtime.sendMessage) {
+      if (typeof callback === 'function') callback();
+      return;
+    }
+    chrome.runtime.sendMessage(message, (resp) => {
+      // Access lastError to suppress Unchecked runtime.lastError warnings
+      const _ignored = chrome.runtime.lastError;
+      if (typeof callback === 'function') callback(resp);
+    });
+  } catch (_) {
+    if (typeof callback === 'function') callback();
+  }
+}
+
 // Persistence helpers: store selections per tab via background
 function appendSelectionToBackground(elementData, cb) {
   try {
-    chrome.runtime.sendMessage({ action: 'appendSelection', data: elementData }, (resp) => {
+    sendRuntimeMessageSafe({ action: 'appendSelection', data: elementData }, (resp) => {
       if (typeof cb === 'function') cb(resp);
     });
   } catch (_) { if (typeof cb === 'function') cb(); }
@@ -86,7 +103,7 @@ function appendSelectionToBackground(elementData, cb) {
 
 function loadSelectionsFromBackground(callback) {
   try {
-    chrome.runtime.sendMessage({ action: 'getTabSelections' }, (resp) => {
+    sendRuntimeMessageSafe({ action: 'getTabSelections' }, (resp) => {
       const saved = resp && Array.isArray(resp.elements) ? resp.elements : [];
       selectedElements = saved;
       if (typeof callback === 'function') callback(selectedElements);
@@ -109,7 +126,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.action === 'clearData') {
     selectedElements = [];
     // Clear persisted selections for this tab in background
-    try { chrome.runtime.sendMessage({ action: 'clearTabSelections' }); } catch (_) {}
+    try { sendRuntimeMessageSafe({ action: 'clearTabSelections' }); } catch (_) {}
     // Update the navbar counter if it exists
     if (window.updateElementCounter) {
       window.updateElementCounter(0);
@@ -273,10 +290,10 @@ function createNavbar() {
       document.body.style.cursor = 'crosshair';
       
       // Notify popup to update its UI
-      chrome.runtime.sendMessage({
-        action: 'selectionToggled',
-        isActive: true
-      });
+  sendRuntimeMessageSafe({
+    action: 'selectionToggled',
+    isActive: true
+  });
     }
     
     return false;
@@ -312,7 +329,7 @@ function createNavbar() {
     document.body.style.cursor = 'default';
     
     // Notify popup
-    chrome.runtime.sendMessage({
+    sendRuntimeMessageSafe({
       action: 'selectionClosed'
     });
     
@@ -375,7 +392,7 @@ function startSelectionMode() {
   }
   
   // Notify popup
-  chrome.runtime.sendMessage({
+  sendRuntimeMessageSafe({
     action: 'selectionToggled',
     isActive: true
   });
@@ -490,7 +507,7 @@ function handleClick(event) {
     }
     
     // Notify the popup about the new selection
-    chrome.runtime.sendMessage({
+    sendRuntimeMessageSafe({
       action: 'elementSelected',
       data: elementData,
       count: selectedElements.length
@@ -505,16 +522,117 @@ function handleClick(event) {
 function extractElementData(element) {
   // Get element's XPath
   const xpath = getElementXPath(element);
-  
+
   // Get CSS selector
   const cssSelector = getElementCSSSelector(element);
-  
-  // Get element attributes
+
+  // Gather raw attributes
   const attributes = {};
   for (const attr of element.attributes) {
     attributes[attr.name] = attr.value;
   }
-  
+
+  // Helpers to resolve URLs
+  const resolveUrl = (url) => {
+    try {
+      return new URL(url, document.baseURI).href;
+    } catch (_) {
+      return url || '';
+    }
+  };
+
+  const absolutizeSrcset = (srcset) => {
+    if (!srcset) return '';
+    return srcset
+      .split(',')
+      .map(part => {
+        const trimmed = part.trim();
+        if (!trimmed) return '';
+        const pieces = trimmed.split(/\s+/);
+        const url = pieces[0];
+        const desc = pieces.slice(1).join(' ');
+        const abs = resolveUrl(url);
+        return [abs, desc].filter(Boolean).join(' ');
+      })
+      .filter(Boolean)
+      .join(', ');
+  };
+
+  // Build a normalized clone with absolute URLs
+  const normalizeNodeUrls = (node) => {
+    if (!(node instanceof Element)) return;
+    const urlAttrs = new Set(['src', 'href', 'poster', 'data', 'action', 'formaction']);
+    for (const attr of Array.from(node.attributes)) {
+      const name = attr.name.toLowerCase();
+      if (name === 'srcset') {
+        node.setAttribute('srcset', absolutizeSrcset(attr.value));
+      } else if (urlAttrs.has(name)) {
+        node.setAttribute(name, resolveUrl(attr.value));
+      } else if (name === 'style') {
+        // Best-effort: absolutize url(...) in inline style
+        const rewritten = attr.value.replace(/url\(([^)]+)\)/g, (m, p1) => {
+          const raw = p1.trim().replace(/^['"]|['"]$/g, '');
+          const abs = resolveUrl(raw);
+          return `url(${abs})`;
+        });
+        node.setAttribute('style', rewritten);
+      }
+    }
+    // Recurse
+    for (const child of Array.from(node.children)) normalizeNodeUrls(child);
+  };
+
+  const clone = element.cloneNode(true);
+  normalizeNodeUrls(clone);
+  const absoluteOuterHTML = clone.outerHTML;
+
+  // Primary content source for common media/link elements
+  let currentSrc = '';
+  let srcAbsolute = '';
+  let hrefAbsolute = '';
+  if ('currentSrc' in element && element.currentSrc) {
+    currentSrc = element.currentSrc;
+  }
+  if (element.getAttribute && element.getAttribute('src')) {
+    srcAbsolute = resolveUrl(element.getAttribute('src'));
+  }
+  if (element.href) {
+    hrefAbsolute = element.href; // already absolute in DOM APIs
+  } else if (element.getAttribute && element.getAttribute('href')) {
+    hrefAbsolute = resolveUrl(element.getAttribute('href'));
+  }
+
+  // Collect all content sources from this element subtree
+  const contentSources = [];
+  const push = (u) => { if (u && !contentSources.includes(u)) contentSources.push(u); };
+
+  if (currentSrc) push(currentSrc);
+  if (srcAbsolute) push(srcAbsolute);
+  if (hrefAbsolute) push(hrefAbsolute);
+
+  // Scan subtree for url-carrying attributes
+  const nodes = [element, ...Array.from(element.querySelectorAll('*'))];
+  nodes.forEach(n => {
+    if (!(n instanceof Element)) return;
+    const s = n.getAttribute('src');
+    const h = n.getAttribute('href');
+    const p = n.getAttribute('poster');
+    const d = n.getAttribute('data');
+    const a = n.getAttribute('action');
+    const fa = n.getAttribute('formaction');
+    if (s) push(resolveUrl(s));
+    if (h) push(resolveUrl(h));
+    if (p) push(resolveUrl(p));
+    if (d) push(resolveUrl(d));
+    if (a) push(resolveUrl(a));
+    if (fa) push(resolveUrl(fa));
+    const ss = n.getAttribute('srcset');
+    if (ss) absolutizeSrcset(ss).split(',').forEach(part => {
+      const url = part.trim().split(/\s+/)[0];
+      push(url);
+    });
+  });
+
   return {
     tagName: element.tagName.toLowerCase(),
     id: element.id || '',
@@ -525,7 +643,11 @@ function extractElementData(element) {
     attributes: attributes,
     innerHTML: element.innerHTML.substring(0, 200),
     outerHTML: element.outerHTML.substring(0, 200),
-    selectedElement: element.outerHTML, // Store the complete HTML of the element
+    selectedElement: absoluteOuterHTML, // normalized outerHTML with absolute URLs
+    currentSrc,
+    srcAbsolute,
+    hrefAbsolute,
+    contentSources,
     timestamp: new Date().toISOString()
   };
 }
